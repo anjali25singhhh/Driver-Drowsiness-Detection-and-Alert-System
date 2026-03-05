@@ -1,6 +1,6 @@
 // DriverProfileManager.js (continued)
 import React, { useState, useEffect } from 'react';
-import { Card, Form, Button, Alert, Modal, InputGroup, ListGroup, Badge } from 'react-bootstrap';
+import { Card, Form, Button, Alert, Modal, ListGroup, Badge } from 'react-bootstrap';
 import axios from 'axios';
 
 const DriverProfileManager = ({ onDriverSelect, currentDriverId }) => {
@@ -54,7 +54,7 @@ const DriverProfileManager = ({ onDriverSelect, currentDriverId }) => {
         return;
       }
 
-      const response = await axios.post(`${API_BASE_URL}/api/drivers`, newDriver);
+      await axios.post(`${API_BASE_URL}/api/drivers`, newDriver);
       
       // Add the new driver to the list
       fetchDrivers();

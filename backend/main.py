@@ -1425,52 +1425,181 @@ def detect_drowsiness(frame):
     return frame
 
 # Initialize computer vision components
-try:
-    # Check if model files exist
-    check_model_files()
+detector = None
+predictor = None
+model = None
+alarm_sound = None
+
+def initialize_cv_components():
+    """Initialize all CV components including camera on startup for instant response"""
+    global detector, predictor, model, alarm_sound, cam
     
-    # Initialize detector
-    detector = dlib.get_frontal_face_detector()
+    print("🚀 Initializing computer vision components...")
     
-    # Try to load the predictor if it exists
-    if os.path.exists(LANDMARKS_PATH):
-        predictor = dlib.shape_predictor(LANDMARKS_PATH)
-    else:
+    try:
+        # Check if model files exist
+        check_model_files()
+        
+        # Initialize detector
+        print("   Loading face detector...")
+        detector = dlib.get_frontal_face_detector()
+        print("   ✅ Face detector loaded")
+        
+        # Try to load the predictor if it exists
+        if os.path.exists(LANDMARKS_PATH):
+            print("   Loading shape predictor (68 landmarks)...")
+            predictor = dlib.shape_predictor(LANDMARKS_PATH)
+            print("   ✅ Shape predictor loaded")
+        else:
+            print("   ⚠️  Shape predictor not found, using fallback")
+            predictor = None
+        
+        # Try to load the model if it exists
+        if os.path.exists(MODEL_PATH):
+            print("   Loading drowsiness model...")
+            model = load_model(MODEL_PATH)
+            print("   ✅ Drowsiness model loaded")
+        else:
+            predictor = None
+            model = None
+        
+        # Initialize pygame for audio
+        print("   Initializing audio system...")
+        pygame.mixer.init()
+        if os.path.exists(ALARM_SOUND_PATH):
+            alarm_sound = pygame.mixer.Sound(ALARM_SOUND_PATH)
+            print("   ✅ Alarm sound loaded")
+        else:
+            print("   ⚠️  Alarm sound not found")
+            alarm_sound = None
+        
+        # SKIP CAMERA PRE-WARM: open only when user presses Start
+        print("   Skipping camera pre-warm (will open on Start)")
+        try:
+            if cam is not None and cam.isOpened():
+                cam.release()
+        except Exception:
+            pass
+        cam = None
+        
+        print("✅ All components initialized! Camera startup delay eliminated.\n")
+        
+    except Exception as e:
+        print(f"❌ Error initializing components: {e}")
+        detector = None
         predictor = None
-    
-    # Try to load the model if it exists
-    if os.path.exists(MODEL_PATH):
-        model = load_model(MODEL_PATH)
-    else:
         model = None
-    
-    # Initialize pygame for audio
-    pygame.mixer.init()
-    if os.path.exists(ALARM_SOUND_PATH):
-        alarm_sound = pygame.mixer.Sound(ALARM_SOUND_PATH)
-    else:
         alarm_sound = None
-    
-except Exception as e:
-    print(f"Error initializing components: {e}")
-    detector = None
-    predictor = None
-    model = None
-    alarm_sound = None
+        if cam is not None:
+            cam.release()
+            cam = None
+
+def open_camera():
+    """Robustly open the webcam on Windows by trying multiple indices and backends.
+    Prefers DirectShow (CAP_DSHOW) which is more stable than MSMF for many devices.
+    Also configures FPS, resolution, buffersize, and MJPG FOURCC to avoid MSMF issues.
+    """
+    global cam
+    try_indices = [0, 1, 2, 3]
+    backends = []
+    # Some OpenCV builds may not expose CAP_DSHOW/CAP_MSMF; guard access
+    try:
+        backends.append(cv2.CAP_DSHOW)
+    except Exception:
+        pass
+    try:
+        backends.append(cv2.CAP_MSMF)
+    except Exception:
+        pass
+    # Always include default fallback
+    backends.append(None)
+
+    for idx in try_indices:
+        for backend in backends:
+            try:
+                cap = cv2.VideoCapture(idx, backend) if backend is not None else cv2.VideoCapture(idx)
+            except Exception:
+                cap = cv2.VideoCapture(idx)
+            if not cap or not cap.isOpened():
+                try:
+                    if cap:
+                        cap.release()
+                except Exception:
+                    pass
+                continue
+            # Configure camera properties
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            try:
+                cap.set(cv2.CAP_PROP_FPS, 30)
+            except Exception:
+                pass
+            try:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            except Exception:
+                pass
+            # Prefer MJPG to reduce color/latency issues on Windows
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            except Exception:
+                pass
+            # Warm up a few frames
+            ok = False
+            for _ in range(5):
+                ret, _frm = cap.read()
+                if ret:
+                    ok = True
+                    break
+                time.sleep(0.05)
+            if ok:
+                # Release previous camera if different
+                try:
+                    if cam is not None and cam is not cap and cam.isOpened():
+                        cam.release()
+                except Exception:
+                    pass
+                cam = cap
+                try:
+                    backend_name = (
+                        'DShow' if (backend is not None and backend == cv2.CAP_DSHOW) else
+                        'MSMF' if (backend is not None and backend == cv2.CAP_MSMF) else
+                        'Default'
+                    )
+                except Exception:
+                    backend_name = 'Default'
+                print(f"   ✅ Camera opened (index={idx}, backend={backend_name})")
+                return True
+            else:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+    print("   ❌ Unable to open any camera (tried indices 0-3 with DShow/MSMF)")
+    return False
 
 # Initialize database
 initialize_database()
+
+# PRE-INITIALIZE ALL COMPONENTS ON STARTUP
+initialize_cv_components()
 
 # Video streaming generator function
 def generate_frames():
     global cam, stop_event, current_frame
     
+    print(f"[STREAM] New client connected. cam={cam is not None and (cam.isOpened() if cam else False)}, stop_event={stop_event.is_set()}")
+    
     try:
+        frame_count = 0
         while not stop_event.is_set():
             if cam is None or current_frame is None:
                 # If camera isn't initialized or frame isn't available, return a blank frame
                 blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(blank_frame, "Camera not started", (150, 240), 
+                status_msg = "Initializing camera..." if cam is not None else "Camera not started"
+                cv2.putText(blank_frame, status_msg, (100, 240), 
                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                 ret, buffer = cv2.imencode('.jpg', blank_frame)
                 frame = buffer.tobytes()
@@ -1489,25 +1618,70 @@ def generate_frames():
                     frame_bytes = buffer.tobytes()
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                    frame_count += 1
+                    if frame_count == 1:
+                        print("[STREAM] First frame sent successfully")
                 except Exception as e:
-                    print(f"Error encoding frame: {e}")
+                    print(f"[STREAM] Error encoding frame: {e}")
                     time.sleep(0.1)
     except GeneratorExit:
-        print("Video stream client disconnected")
+        print(f"[STREAM] Client disconnected after {frame_count} frames")
     except Exception as e:
-        print(f"Error in frame generator: {e}")
+        print(f"[STREAM] Error in frame generator: {e}")
 
 # Continuous video processing function
 def process_video():
     global cam, stop_event, current_frame
-    
+
+    print("[PROCESS] Video processing thread started")
+    fail_count = 0
+    frame_count = 0
     try:
+        # Skip first few frames for better stability
+        for i in range(5):
+            if cam is not None and cam.isOpened():
+                ret, _ = cam.read()
+                if ret:
+                    print(f"[PROCESS] Warmup frame {i+1}/5 ok")
+                else:
+                    print(f"[PROCESS] Warmup frame {i+1}/5 failed")
+        
         while not stop_event.is_set():
+            if cam is None or not cam.isOpened():
+                print("[PROCESS] Camera not available in processing thread; attempting reopen...")
+                if not open_camera():
+                    time.sleep(0.5)
+                    continue
+                # brief warmup after reopen
+                for _ in range(3):
+                    cam.read()
+                print("[PROCESS] Camera reopened successfully")
+
             ret, frame = cam.read()
             if not ret:
-                print("Failed to grab frame")
+                fail_count += 1
+                if fail_count == 1:
+                    print(f"[PROCESS] Failed to grab frame (attempt {fail_count})")
+                elif fail_count % 10 == 0:
+                    print(f"[PROCESS] Still failing to grab frames (attempt {fail_count})")
+                if fail_count >= 30:
+                    print("[PROCESS] Multiple frame grab failures; attempting camera reopen...")
+                    try:
+                        if cam and cam.isOpened():
+                            cam.release()
+                    except Exception:
+                        pass
+                    open_camera()
+                    fail_count = 0
                 time.sleep(0.1)
                 continue
+
+            fail_count = 0
+            frame_count += 1
+            if frame_count == 1:
+                print("[PROCESS] First frame processed successfully!")
+            elif frame_count % 100 == 0:
+                print(f"[PROCESS] Processed {frame_count} frames")
             
             # Process the frame for drowsiness detection
             processed_frame = detect_drowsiness(frame)
@@ -1519,19 +1693,26 @@ def process_video():
             # Small sleep to reduce CPU usage
             time.sleep(0.01)
     except Exception as e:
-        print(f"Error in video processing thread: {e}")
+        print(f"[PROCESS] Error in video processing thread: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        if cam is not None:
-            cam.release()
-            cam = None
-        print("Video processing stopped")
+        # RELEASE camera when stopping so it isn't held between runs
+        try:
+            if cam is not None and cam.isOpened():
+                cam.release()
+        except Exception:
+            pass
+        current_frame = None
+        print(f"[PROCESS] Video processing stopped after {frame_count} frames (camera released)")
 
 # Route for video streaming
 @app.route('/video_feed')
+
 def video_feed():
+    # Do NOT auto-start camera; only stream if running, otherwise placeholder frames are served
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
-
 # Route to start detection
 @app.route('/start')
 def start_detection():
@@ -1542,17 +1723,28 @@ def start_detection():
         return jsonify({"error": "No driver selected. Please select a driver profile first."}), 400
     
     # Check if already running
-    if cam is not None and detection_thread is not None and detection_thread.is_alive():
+    if detection_thread is not None and detection_thread.is_alive():
         return jsonify({"message": "Detection already running"})
     
     # Clear stop event
     stop_event.clear()
     
-    # Initialize camera
+    # Use pre-warmed camera or initialize new one if needed
     try:
-        cam = cv2.VideoCapture(0)  # Use default camera
-        if not cam.isOpened():
-            return jsonify({"error": "Could not open camera"}), 500
+        # If camera wasn't pre-warmed or was released, open it now
+        if cam is None or not cam.isOpened():
+            print("Camera not pre-warmed, initializing now (robust)...")
+            if not open_camera():
+                return jsonify({"error": "Could not open camera"}), 500
+        else:
+            # Ensure camera is responsive; try a quick read
+            ok, _ = cam.read()
+            if not ok:
+                print("Pre-warmed camera unresponsive, reopening...")
+                if not open_camera():
+                    return jsonify({"error": "Could not reopen camera"}), 500
+            else:
+                print("Using pre-warmed camera - instant start! ⚡")
         
         # Start video processing in a separate thread
         detection_thread = threading.Thread(target=process_video)
@@ -1592,6 +1784,15 @@ def stop_detection():
     detection_results["isDrowsy"] = False
     detection_results["counter"] = 0
     detection_results["blinkCount"] = 0
+    
+    # Release camera so it is not used after Stop
+    try:
+        if cam and cam.isOpened():
+            cam.release()
+    except Exception:
+        pass
+    
+    print("Detection stopped, camera released")
     
     return jsonify({"message": "Detection stopped successfully"})
 

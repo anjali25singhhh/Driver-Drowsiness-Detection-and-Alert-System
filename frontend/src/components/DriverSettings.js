@@ -24,6 +24,7 @@ const DriverSettings = ({ driverId }) => {
     } else {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [driverId]);
 
   const loadSettings = async () => {
